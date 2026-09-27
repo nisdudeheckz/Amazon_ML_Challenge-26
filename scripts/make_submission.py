@@ -47,6 +47,8 @@ def main() -> None:
     ap.add_argument("--doc", type=Path, default=ROOT / "docs" / "Documentation_template.md")
     ap.add_argument("--report", type=Path, default=None, help="metrics json to copy (default: work/train_report.json)")
     ap.add_argument("--no-zip", action="store_true")
+    ap.add_argument("--resource-dir", type=Path, default=ROOT / "student_resource",
+                    help="organisers' student_resource/ (validator + test data)")
     args = ap.parse_args()
 
     base = ROOT / "Submissions"
@@ -71,11 +73,11 @@ def main() -> None:
     if report.exists():
         shutil.copy2(report, dest / "metrics.json")
 
-    validator = ROOT / "student_resource" / "utils" / "validate_submission.py"
+    validator = args.resource_dir / "utils" / "validate_submission.py"
     res = subprocess.run(
         [sys.executable, str(validator), "--matching", str(out / "matching_results.tsv"),
          "--candidate", str(out / "candidate_pairs.tsv"),
-         "--test-dir", str(ROOT / "student_resource" / "dataset" / "test"), "--check-ids"],
+         "--test-dir", str(args.resource_dir / "dataset" / "test"), "--check-ids"],
         capture_output=True, text=True,
     )
     (dest / "validation.txt").write_text(res.stdout + res.stderr, encoding="utf-8")

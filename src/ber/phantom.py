@@ -168,8 +168,11 @@ def run(data: Path, work: Path, out_dir: Path) -> dict:
     dec_rootph = choose_decision(ev_root, truth, s1_eval_ph["entity_id"])
     report["rootph_decision"] = {k: dec_rootph[k] for k in ("rule", "lam", "floor", "threshold")}
     report["rootph_on_phantom"] = _metrics(ev_root, dec_rootph, truth, s1_eval_ph)
-    _log(f"ROOT+phantom-tuned decision {report['rootph_decision']}: phantom {_brief(report['rootph_on_phantom']['all'])}")
-    del root
+    ev_root_norm = pl.read_parquet(work / "eval_pred_s2.parquet")   # root model, normal held-out
+    report["rootph_on_normal"] = _metrics(ev_root_norm, dec_rootph, truth, s1_eval_norm)
+    _log(f"ROOT+phantom-tuned decision {report['rootph_decision']}: phantom {_brief(report['rootph_on_phantom']['all'])} "
+         f"normal {_brief(report['rootph_on_normal']['all'])}")
+    del root, ev_root_norm
 
     # 3. stage 2 refitted on phantom rows
     ytr, yes = np.concatenate(ytr), np.concatenate(yes)
