@@ -38,3 +38,12 @@ The winner was picked by a rule fixed before the run (`scripts/pick_final.py`):
 - **Risk:** on data without orphans it costs −0.00009, which is noise. If the orphan explanation is wrong, the expected change is about zero.
 
 Submission-5 remains the fallback (`champion/sub5/`, read-only).
+
+## France risk (found after packaging; read before choosing S6 over S5)
+
+- S6 is more conservative everywhere, but **France is hit hardest**: 21.8k of S5's France pairs are dropped (2.5%), against about 0.6% in US and India. **1,099 France S1s go from matched to empty.**
+- On the normal held-out, the pairs S6 drops relative to the standard model are about **78% true**, going by the P/R arithmetic. S6 only breaks even there because removing an FP is worth about 3× keeping a TP.
+- The dropped France pairs we sampled are mixed:
+  - distractor-like: "Libre Club SARL" / "Libre Ecole SARL", and SA→SASU with a changed house number;
+  - true-copy-like: "VUA Societe SARL" / "VUTA Societe SARL", "@ROUBAIXAMICALE", and generic-word swaps, which Submission-4 learned to accept and gained leaderboard points for.
+- **Only the leaderboard can settle France.** If S6's public score is below S5's, submit S5 as the final.

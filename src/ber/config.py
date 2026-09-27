@@ -24,4 +24,5 @@ MAX_DF = int(os.environ.get("BER_MAX_DF", "6000"))
 TRAIN_FRAC = int(os.environ.get("BER_TRAIN_FRAC", "400"))
 SELF_TRAIN = os.environ.get("BER_SELF_TRAIN", "0") == "1"
 CHUNK = int(os.environ.get("BER_CHUNK", "500000"))
+COLLECTIVE = os.environ.get("BER_COLLECTIVE", "0") == "1"   # phantom step: add collective.py features
 PHANTOM = int(os.environ.get("BER_PHANTOM", "180"))

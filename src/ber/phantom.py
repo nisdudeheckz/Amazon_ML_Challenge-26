@@ -30,13 +30,16 @@ import lightgbm as lgb
 import numpy as np
 import polars as pl
 
-from . import config
+from . import collective, config
 from .candidates import KEEP_RATIO
 from .io import read_source, write_id_lists
 from .metrics import macro_f05
 from .model import ID_COLS, PARAMS, _eval_s1, _train_q, choose_decision, decide
 from .stage2 import S2_ROUNDS, _X, _fold, _labels, _parts, iter_stage2, stage2_aggregates
 
+COLL = collective.COLL if config.COLLECTIVE else ()
+TAG = "ph2" if config.COLLECTIVE else "ph"          # model / output name of the refitted stage 2
+REPORT = "phantom2_report" if config.COLLECTIVE else "phantom_report"
 LIST_COLS = ("bscore", "brank", "top1", "top2", "n_ret", "gap_top1", "top_margin", "ratio_top1")
 
 
@@ -131,13 +134,21 @@ def run(data: Path, work: Path, out_dir: Path) -> dict:
     p1 = pl.concat(p1s)
     del p1s
     eval_q = p1.filter(_eval_s1(pl.col("s1_id"))).select("q_id").unique()
-    s2 = stage2_aggregates(p1, ctx).partition_by("part", as_dict=True, include_key=False)
-    del p1, ctx
+    s2 = stage2_aggregates(p1, ctx)
+    del ctx
+    if COLL:
+        qtok, s1tok = collective.record_tokens(work, "train")
+        s2 = s2.join(collective.collective_features(p1, qtok, s1tok), on=ID_COLS, how="left")
+        del qtok, s1tok
+        _log("collective features (phantom world) built")
+    s2 = s2.partition_by("part", as_dict=True, include_key=False)
+    del p1
     _log("phantom stage-1 scores and stage-2 features built")
 
     # stage-2 rows in the phantom world
     root = lgb.Booster(model_file=str(work / "stage2.txt"))
-    feats = root.feature_name()
+    root_feats = root.feature_name()
+    feats = root_feats + list(COLL)     # root features first: root scores Xev[:, :len(root_feats)]
     Xtr, ytr, Xes, yes, ev_ids, Xev = [], [], [], [], [], []
     for p in parts:
         if (p.stem,) not in s2:
@@ -159,7 +170,7 @@ def run(data: Path, work: Path, out_dir: Path) -> dict:
     root_report = json.load(open(work / "stage2_report.json"))
 
     # 1. root model + root decision, phantom world
-    ev_root = ev_ids.with_columns(pl.Series("p", root.predict(Xev, num_threads=config.N_THREADS)))
+    ev_root = ev_ids.with_columns(pl.Series("p", root.predict(Xev[:, :len(root_feats)], num_threads=config.N_THREADS)))
     report["root_on_phantom"] = _metrics(ev_root, root_report, truth, s1_eval_ph)
     report["root_on_normal"] = root_report["metrics"]
     _log(f"ROOT normal : {_brief(root_report['metrics'])}")
@@ -183,7 +194,7 @@ def run(data: Path, work: Path, out_dir: Path) -> dict:
     booster = lgb.train(PARAMS, dtr, S2_ROUNDS, valid_sets=[dev], valid_names=["eval"],
                         callbacks=[lgb.early_stopping(50), lgb.log_evaluation(100)])
     del dtr, dev
-    booster.save_model(str(work / "stage2_ph.txt"))
+    booster.save_model(str(work / f"stage2_{TAG}.txt"))
     ev_ph = ev_ids.with_columns(pl.Series("p", booster.predict(Xev, num_threads=config.N_THREADS)))
     del Xev
     dec_ph = choose_decision(ev_ph, truth, s1_eval_ph["entity_id"])
@@ -191,9 +202,12 @@ def run(data: Path, work: Path, out_dir: Path) -> dict:
     report["ph_on_phantom"] = _metrics(ev_ph, dec_ph, truth, s1_eval_ph)
     # ... and in the normal world (must not lose much there)
     norm_q = pl.scan_parquet(work / "train" / "p1.parquet").filter(_eval_s1(pl.col("s1_id"))).select("q_id").unique().collect()
+    cf = _normal_collective(work, "train")
     preds = []
     for df in iter_stage2(work, "train"):
         df = df.join(norm_q, on="q_id", how="semi")
+        if cf is not None:
+            df = df.join(cf, on=ID_COLS, how="left")
         preds.append(df.select(ID_COLS).with_columns(pl.Series("p", booster.predict(_X(df, feats), num_threads=config.N_THREADS))))
     ev_norm = pl.concat(preds)
     report["ph_on_normal"] = _metrics(ev_norm, dec_ph, truth, s1_eval_norm)
@@ -201,21 +215,35 @@ def run(data: Path, work: Path, out_dir: Path) -> dict:
     _log(f"PH  phantom : {_brief(report['ph_on_phantom']['all'])}  decision {report['ph_decision']}")
     _log(f"PH  normal  : {_brief(report['ph_on_normal']['all'])} (re-tuned {_brief(report['ph_on_normal_retuned'])})")
     json.dump({**dec_ph, "best_iteration": booster.best_iteration, "features": feats},
-              open(work / "stage2_ph_report.json", "w"), indent=1)
-    with open(work / "phantom_report.json", "w") as f:
+              open(work / f"stage2_{TAG}_report.json", "w"), indent=1)
+    with open(work / f"{REPORT}.json", "w") as f:
         json.dump(report, f, indent=1)
 
     # test outputs: root predictions with the phantom-tuned rule, and the phantom model
     s1_test = read_source(data / "test" / "test_source1.tsv")["entity_id"]
-    tp = pl.read_parquet(work / "test_pred_s2.parquet")
-    _write(tp, dec_rootph, s1_test, out_dir / "rootph")
+    if not COLL:
+        tp = pl.read_parquet(work / "test_pred_s2.parquet")
+        _write(tp, dec_rootph, s1_test, out_dir / "rootph")
+    cf = _normal_collective(work, "test")
     tp = []
     for df in iter_stage2(work, "test"):
+        if cf is not None:
+            df = df.join(cf, on=ID_COLS, how="left")
         tp.append(df.select(ID_COLS).with_columns(pl.Series("p", booster.predict(_X(df, feats), num_threads=config.N_THREADS))))
     tp = pl.concat(tp)
-    tp.write_parquet(work / "test_pred_s2_ph.parquet")
-    _write(tp, dec_ph, s1_test, out_dir / "ph")
+    tp.write_parquet(work / f"test_pred_s2_{TAG}.parquet")
+    _write(tp, dec_ph, s1_test, out_dir / TAG)
     return report
+
+
+def _normal_collective(work: Path, split: str) -> pl.DataFrame | None:
+    """Collective features of the normal (unmodified) candidate set of a split."""
+    if not COLL:
+        return None
+    qtok, s1tok = collective.record_tokens(work, split)
+    cf = collective.collective_features(pl.read_parquet(work / split / "p1.parquet", columns=[*ID_COLS, "p1"]), qtok, s1tok)
+    _log(f"collective features ({split}, normal) built: {cf.shape}")
+    return cf
 
 
 def _write(pairs: pl.DataFrame, decision: dict, s1_ids: pl.Series, out: Path) -> None:

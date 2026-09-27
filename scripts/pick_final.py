@@ -27,6 +27,10 @@ BAR = 0.98859            # champion family held-out F0.5 (Submission-4/5 records
 ROOT_TOL = 0.0003
 MIN_GAIN = 0.0005
 MAX_NORMAL_LOSS = 0.0005
+# ph2 (stage 2 refitted with orphans + collective features) replaces the chosen model only
+# with a paired gain on the orphan held-out and (almost) no normal loss; fixed before its run
+PH2_MIN_GAIN = 0.0003
+PH2_MAX_NORMAL_LOSS = 0.0002
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -53,6 +57,12 @@ def main() -> None:
         rows["ph"] = {"normal": ph["ph_on_normal"]["all"]["f05"],
                       "phantom": ph["ph_on_phantom"]["all"]["f05"], "dir": a.output_dir / "ph"}
 
+    ph2_path = a.work_dir / "phantom2_report.json"
+    ph2 = json.load(open(ph2_path)) if ph2_path.exists() and (a.output_dir / "ph2" / "matching_results.tsv").exists() else None
+    if ph2:
+        rows["ph2"] = {"normal": ph2["ph_on_normal"]["all"]["f05"], "phantom": ph2["ph_on_phantom"]["all"]["f05"],
+                       "dir": a.output_dir / "ph2"}
+
     choice, why = "champion", f"root held-out {root_norm:.5f} < {BAR - ROOT_TOL:.5f}: keep Submission-5"
     if root_norm >= BAR - ROOT_TOL:
         choice, why = "root", f"root held-out {root_norm:.5f} >= {BAR - ROOT_TOL:.5f}"
@@ -69,6 +79,16 @@ def main() -> None:
                 why += "; no phantom variant cleared the gain/loss bars"
         else:
             why += "; phantom step unavailable"
+
+    if ph2 and choice in ("root", "rootph", "ph"):
+        cur, new = rows[choice], rows["ph2"]
+        if new["phantom"] >= cur["phantom"] + PH2_MIN_GAIN and new["normal"] >= cur["normal"] - PH2_MAX_NORMAL_LOSS:
+            why += (f"; ph2 replaces {choice}: orphan {new['phantom']:.5f} vs {cur['phantom']:.5f}, "
+                    f"normal {new['normal']:.5f} vs {cur['normal']:.5f}")
+            choice = "ph2"
+        else:
+            why += (f"; ph2 rejected vs {choice}: orphan {new['phantom']:.5f} vs {cur['phantom']:.5f}, "
+                    f"normal {new['normal']:.5f} vs {cur['normal']:.5f}")
 
     table = {k: {"normal_f05": r["normal"], "orphan_f05": r["phantom"], "output": str(r["dir"])} for k, r in rows.items()}
     decision = {"choice": choice, "reason": why, "bar": BAR, "candidates": table}
