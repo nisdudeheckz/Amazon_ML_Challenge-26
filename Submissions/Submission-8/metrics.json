@@ -1,0 +1,14 @@
+{
+ "metrics": {
+  "f05": 0.9886076322665294,
+  "f05_singletons": 0.9926864943929791,
+  "f05_nonsingletons": 0.9883664587594803,
+  "pair_precision": 0.9982460928949196,
+  "pair_recall": 0.968847948507445,
+  "n": 110216
+ },
+ "rule": "expected_f",
+ "lam": 0.0,
+ "floor": 0.65,
+ "threshold": 0.65
+}
