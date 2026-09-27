@@ -1,0 +1,2 @@
+*.sh text eol=lf
+aws/config.env text eol=lf

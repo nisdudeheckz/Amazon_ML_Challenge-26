@@ -1,0 +1,219 @@
+"""Cross-country transfer experiments (a proxy for the unseen test country).
+
+France only appears in the test set, so its score cannot be measured offline. The
+closest proxy: train on one training country, tune the decision rule on that country's
+held-out entities, then score the *other* country — exactly how the pipeline treats
+France. Comparing feature groups this way shows which features transfer and which
+only fit the training countries.
+
+Output: work/xval_report.json (and a table in the log).
+"""
+from __future__ import annotations
+
+import json
+import time
+from pathlib import Path
+
+import lightgbm as lgb
+import numpy as np
+import polars as pl
+
+from .io import read_ground_truth, read_source
+from .metrics import macro_f05
+from .model import DROP_FEATURES, ID_COLS, PARAMS, _eval_s1, choose_decision, decide, ensure_context
+
+ROUNDS = 600
+FIT_FRAC = 300      # per mille of the source country's records used for fitting
+TARGET_FRAC = 200   # per mille of the target country's S1 entities that are scored
+
+
+def _log(msg: str) -> None:
+    print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
+
+
+def _target_s1(expr: pl.Expr) -> pl.Expr:
+    return (expr.hash(29) % 1000) < TARGET_FRAC
+
+
+def _country_parts(work: Path, country: str) -> list[Path]:
+    return sorted((work / "train" / "parts").glob(f"{country}_*.parquet"))
+
+
+def _load(work: Path, p: Path, ctx: pl.DataFrame) -> pl.DataFrame:
+    df = pl.read_parquet(p).join(ctx, on=ID_COLS, how="left")
+    extra = work / "train" / "extra" / p.name
+    if extra.exists():
+        df = df.join(pl.read_parquet(extra), on=ID_COLS, how="left")
+    return df
+
+
+STRUCT = ("s_addr_n", "s_addr_w1_n", "s_support", "q_addr_s1n", "q_support")
+PCT = ("nm_qx_maxpct", "nm_qx_minpct", "nm_sx_maxpct", "nm_sx_minpct")
+
+
+def feature_groups(all_feats: list[str]) -> dict[str, list[str]]:
+    """Current feature set without the newest groups (structure, word-commonness
+    percentiles), with each of them, and with both."""
+    base = [f for f in all_feats if f not in STRUCT + PCT]
+    return {"base": base, "+structure": base + [f for f in all_feats if f in STRUCT],
+            "+pct": base + [f for f in all_feats if f in PCT], "full": all_feats}
+
+
+SCALE_GROUPS = {
+    # features whose values depend on country-level scale rather than on the pair
+    "lengths": lambda f: f in {"q_nmlen", "s_nmlen", "q_adlen", "s_adlen", "q_ncomp", "s_ncomp",
+                               "q_nmtok", "s_nmtok", "q_nparts"} or f.startswith(("q_nnz_", "s_nnz_")),
+    "namefreq": lambda f: f in {"q_name_freq", "s_name_freq"},
+    "s1ctx": lambda f: f in {"s1_nq", "s1_ntop1", "s1_rank", "s1_gap"},
+    "scorescale": lambda f: f in {"bscore", "top1", "top2", "gap_top1", "top_margin", "n_ret"},
+}
+
+
+def ablation_groups(all_feats: list[str]) -> dict[str, list[str]]:
+    """Full feature set, minus each country-scale-dependent group, minus all of them."""
+    groups = {"full": all_feats}
+    for name, pred in SCALE_GROUPS.items():
+        groups[f"-{name}"] = [f for f in all_feats if not pred(f)]
+    groups["-all_scale"] = [f for f in all_feats if not any(pred(f) for pred in SCALE_GROUPS.values())]
+    return groups
+
+
+def _queries_touching(parts: list[Path], mask) -> pl.DataFrame:
+    return pl.concat([pl.read_parquet(p, columns=ID_COLS).filter(mask(pl.col("s1_id"))).select("q_id")
+                      for p in parts]).unique()
+
+
+def cross_country(data: Path, work: Path, groups_fn=feature_groups, report_name: str = "xval_report.json") -> dict:
+    truth = read_ground_truth(data / "train" / "train_ground_truth.tsv").rename({"match_id": "rid"})
+    labels = truth.select("s1_id", pl.col("rid").alias("q_id"), pl.lit(1, pl.Int8).alias("y"))
+    ctx = pl.read_parquet(ensure_context(work, "train"))
+    s1 = read_source(data / "train" / "train_source1.tsv").select("entity_id", "country")
+    countries = sorted({p.name.rsplit("_", 1)[0] for p in (work / "train" / "parts").glob("*.parquet")})
+    feats_all = [c for c in _load(work, _country_parts(work, countries[0])[0], ctx).columns
+                 if c not in ID_COLS and c not in DROP_FEATURES]
+    groups = groups_fn(feats_all)
+    results = []
+    for src in countries:
+        src_parts = _country_parts(work, src)
+        heldout_q = _queries_touching(src_parts, _eval_s1)
+        fit, held = [], []
+        for p in src_parts:
+            df = _load(work, p, ctx).join(labels, on=ID_COLS, how="left").with_columns(pl.col("y").fill_null(0))
+            fit.append(df.join(heldout_q, on="q_id", how="anti").filter((pl.col("q_id").hash(13) % 1000) < FIT_FRAC))
+            held.append(df.join(heldout_q, on="q_id", how="semi"))
+        fit, held = pl.concat(fit), pl.concat(held)
+        src_eval_ids = s1.filter((pl.col("country") == src) & _eval_s1(pl.col("entity_id")))["entity_id"]
+        for dst in countries:
+            if dst == src:
+                continue
+            dst_parts = _country_parts(work, dst)
+            dst_q = _queries_touching(dst_parts, _target_s1)
+            dst_df = pl.concat([_load(work, p, ctx).join(dst_q, on="q_id", how="semi") for p in dst_parts])
+            dst_ids = s1.filter((pl.col("country") == dst) & _target_s1(pl.col("entity_id")))["entity_id"]
+            for gname, feats in groups.items():
+                t = time.time()
+                booster = lgb.train(PARAMS, lgb.Dataset(fit.select(pl.col(feats).cast(pl.Float32)).to_numpy(),
+                                                        fit["y"].to_numpy(), feature_name=feats), ROUNDS)
+                pred = lambda df: df.select(ID_COLS).with_columns(pl.Series(
+                    "p", booster.predict(df.select(pl.col(feats).cast(pl.Float32)).to_numpy())))
+                decision = choose_decision(pred(held), truth, src_eval_ids)       # tuned on source only
+                same = decision["metrics"]
+                cross = macro_f05(decide(pred(dst_df), decision), truth, dst_ids)
+                row = {"train": src, "eval": dst, "features": gname, "n_features": len(feats),
+                       "same_country_f05": same["f05"], "cross_country_f05": cross["f05"],
+                       "cross_precision": cross["pair_precision"], "cross_recall": cross["pair_recall"],
+                       "rule": decision["rule"], "minutes": round((time.time() - t) / 60, 1)}
+                results.append(row)
+                _log(f"XVAL {src}->{dst} {gname:22s} same={same['f05']:.5f} cross={cross['f05']:.5f} "
+                     f"P={cross['pair_precision']:.4f} R={cross['pair_recall']:.4f}")
+    report = {"rounds": ROUNDS, "target_frac": TARGET_FRAC / 1000, "results": results}
+    with open(work / report_name, "w") as f:
+        json.dump(report, f, indent=1)
+    return report
+
+
+# ----------------------------------------------------------------------------- self-training
+
+PSEUDO_POS = 0.97   # a record's best candidate at or above this becomes a pseudo-match
+PSEUDO_NEG = 0.03   # candidates at or below this become pseudo-non-matches
+
+
+def _pseudo_labels(dst_all: pl.DataFrame, p: np.ndarray) -> pl.DataFrame:
+    """Confident predictions on the (unlabelled) target country as training rows."""
+    d = dst_all.with_columns(pl.Series("p", p))
+    best = pl.col("p") == pl.col("p").max().over("q_id")
+    pos = d.filter(best & (pl.col("p") >= PSEUDO_POS)).with_columns(pl.lit(1, pl.Int32).alias("y"))
+    neg = d.filter(pl.col("p") <= PSEUDO_NEG).with_columns(pl.lit(0, pl.Int32).alias("y"))
+    return pl.concat([pos, neg]).drop("p")
+
+
+def cross_country_selftrain(data: Path, work: Path, group_names=("full",)) -> dict:
+    """Does retraining on confident pseudo-labels of the unseen country close the gap?
+
+    For each (source -> target): fit on the source (M0), pseudo-label the whole target
+    country with M0 (no target labels used), refit on source + pseudo-labels (M1). Both
+    decision rules are tuned on the source's held-out entities only; the target's real
+    labels are used for scoring (and to report pseudo-label precision) only.
+    """
+    truth = read_ground_truth(data / "train" / "train_ground_truth.tsv").rename({"match_id": "rid"})
+    labels = truth.select("s1_id", pl.col("rid").alias("q_id"), pl.lit(1, pl.Int8).alias("y"))
+    ctx = pl.read_parquet(ensure_context(work, "train"))
+    s1 = read_source(data / "train" / "train_source1.tsv").select("entity_id", "country")
+    countries = sorted({p.name.rsplit("_", 1)[0] for p in (work / "train" / "parts").glob("*.parquet")})
+    feats_all = [c for c in _load(work, _country_parts(work, countries[0])[0], ctx).columns if c not in ID_COLS]
+    groups = {k: v for k, v in feature_groups(feats_all).items() if k in group_names}
+    results = []
+
+    def fit_predict(train_df: pl.DataFrame, feats: list[str]):
+        booster = lgb.train(PARAMS, lgb.Dataset(train_df.select(pl.col(feats).cast(pl.Float32)).to_numpy(),
+                                                train_df["y"].to_numpy(), feature_name=feats), ROUNDS)
+        return lambda df: booster.predict(df.select(pl.col(feats).cast(pl.Float32)).to_numpy())
+
+    for src in countries:
+        src_parts = _country_parts(work, src)
+        heldout_q = _queries_touching(src_parts, _eval_s1)
+        fit, held = [], []
+        for p in src_parts:
+            df = _load(work, p, ctx).join(labels, on=ID_COLS, how="left").with_columns(pl.col("y").fill_null(0))
+            fit.append(df.join(heldout_q, on="q_id", how="anti").filter((pl.col("q_id").hash(13) % 1000) < FIT_FRAC))
+            held.append(df.join(heldout_q, on="q_id", how="semi"))
+        fit, held = pl.concat(fit).with_columns(pl.col("y").cast(pl.Int32)), pl.concat(held)
+        src_eval_ids = s1.filter((pl.col("country") == src) & _eval_s1(pl.col("entity_id")))["entity_id"]
+        for dst in countries:
+            if dst == src:
+                continue
+            dst_parts = _country_parts(work, dst)
+            dst_all = pl.concat([_load(work, p, ctx) for p in dst_parts])
+            dst_q = _queries_touching(dst_parts, _target_s1)
+            dst_eval = dst_all.join(dst_q, on="q_id", how="semi")
+            dst_ids = s1.filter((pl.col("country") == dst) & _target_s1(pl.col("entity_id")))["entity_id"]
+            for gname, feats in groups.items():
+                t = time.time()
+                row = {"train": src, "eval": dst, "features": gname}
+                pred0 = fit_predict(fit, feats)
+                dec0 = choose_decision(held.select(ID_COLS).with_columns(pl.Series("p", pred0(held))), truth, src_eval_ids)
+                ev0 = dst_eval.select(ID_COLS).with_columns(pl.Series("p", pred0(dst_eval)))
+                m0 = macro_f05(decide(ev0, dec0), truth, dst_ids)
+                pseudo = _pseudo_labels(dst_all, pred0(dst_all))
+                chk = pseudo.select(*ID_COLS, "y").join(labels.rename({"y": "t"}), on=ID_COLS, how="left")
+                pos_prec = float(chk.filter(pl.col("y") == 1)["t"].is_not_null().mean())
+                neg_err = float(chk.filter(pl.col("y") == 0)["t"].is_not_null().mean())
+                pred1 = fit_predict(pl.concat([fit.select(feats + ["y"]), pseudo.select(feats + ["y"])]), feats)
+                dec1 = choose_decision(held.select(ID_COLS).with_columns(pl.Series("p", pred1(held))), truth, src_eval_ids)
+                ev1 = dst_eval.select(ID_COLS).with_columns(pl.Series("p", pred1(dst_eval)))
+                m1 = macro_f05(decide(ev1, dec1), truth, dst_ids)
+                row.update({"cross_f05_before": m0["f05"], "cross_f05_after": m1["f05"],
+                            "precision_before": m0["pair_precision"], "precision_after": m1["pair_precision"],
+                            "recall_before": m0["pair_recall"], "recall_after": m1["pair_recall"],
+                            "same_f05_after": dec1["metrics"]["f05"],
+                            "pseudo_pos": int((pseudo["y"] == 1).sum()), "pseudo_neg": int((pseudo["y"] == 0).sum()),
+                            "pseudo_pos_precision": pos_prec, "pseudo_neg_error": neg_err,
+                            "minutes": round((time.time() - t) / 60, 1)})
+                results.append(row)
+                _log(f"XVAL-ST {src}->{dst} {gname:22s} cross {m0['f05']:.5f} -> {m1['f05']:.5f} "
+                     f"(P {m0['pair_precision']:.4f}->{m1['pair_precision']:.4f}, R {m0['pair_recall']:.4f}->{m1['pair_recall']:.4f}) "
+                     f"pseudo +{row['pseudo_pos']:,} (prec {pos_prec:.4f}) / -{row['pseudo_neg']:,} (err {neg_err:.4f})")
+    report = {"rounds": ROUNDS, "pseudo_pos": PSEUDO_POS, "pseudo_neg": PSEUDO_NEG, "results": results}
+    with open(work / "xval_selftrain_report.json", "w") as f:
+        json.dump(report, f, indent=1)
+    return report

@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.ipynb_checkpoints/
+.pytest_cache/
+
+# OS / archive junk (the __MACOSX folder only holds AppleDouble metadata)
+__MACOSX/
+.DS_Store
+Thumbs.db
+
+# Organiser-provided challenge material (problem statement, dataset, validator,
+# templates) — not ours to redistribute. Expected locally at student_resource/.
+guidelines.txt
+student_resource/
+
+# Intermediate artifacts produced by the pipeline (regenerable)
+/cache/
+/work*/
+/artifacts/
+/logs/
+/output*/
+dataset.tar.gz
+
+# Large generated submission files (TSVs are 50-500 MB, zips likewise).
+# Code, docs and metrics inside Submissions/Submission-n/ are still tracked.
+Submissions/**/output/*.tsv
+Submissions/**/*.zip
+
+# Editors
+.vscode/
+.idea/
+/aws/.render/
