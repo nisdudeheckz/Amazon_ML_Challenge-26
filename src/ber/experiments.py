@@ -18,6 +18,7 @@ import lightgbm as lgb
 import numpy as np
 import polars as pl
 
+from .enrich import ensure_enriched
 from .io import read_ground_truth, read_source
 from .metrics import macro_f05
 from .model import DROP_FEATURES, ID_COLS, PARAMS, _eval_s1, choose_decision, decide, ensure_context
@@ -86,6 +87,7 @@ def _queries_touching(parts: list[Path], mask) -> pl.DataFrame:
 def cross_country(data: Path, work: Path, groups_fn=feature_groups, report_name: str = "xval_report.json") -> dict:
     truth = read_ground_truth(data / "train" / "train_ground_truth.tsv").rename({"match_id": "rid"})
     labels = truth.select("s1_id", pl.col("rid").alias("q_id"), pl.lit(1, pl.Int8).alias("y"))
+    ensure_enriched(work, "train")
     ctx = pl.read_parquet(ensure_context(work, "train"))
     s1 = read_source(data / "train" / "train_source1.tsv").select("entity_id", "country")
     countries = sorted({p.name.rsplit("_", 1)[0] for p in (work / "train" / "parts").glob("*.parquet")})
@@ -157,6 +159,7 @@ def cross_country_selftrain(data: Path, work: Path, group_names=("full",)) -> di
     """
     truth = read_ground_truth(data / "train" / "train_ground_truth.tsv").rename({"match_id": "rid"})
     labels = truth.select("s1_id", pl.col("rid").alias("q_id"), pl.lit(1, pl.Int8).alias("y"))
+    ensure_enriched(work, "train")
     ctx = pl.read_parquet(ensure_context(work, "train"))
     s1 = read_source(data / "train" / "train_source1.tsv").select("entity_id", "country")
     countries = sorted({p.name.rsplit("_", 1)[0] for p in (work / "train" / "parts").glob("*.parquet")})

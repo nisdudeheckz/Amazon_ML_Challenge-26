@@ -215,6 +215,20 @@ def pair_diff_features(pairs: pl.DataFrame, q: pl.DataFrame, s1: pl.DataFrame, v
     return pl.concat([d.select(ID_COLS), pl.DataFrame(feats)], how="horizontal")
 
 
+# Newest columns written by `enrich`. A work dir restored from an older run (FROM_RUN)
+# has `extra/` without them; reusing it would silently drop these features.
+LATEST_COLS = ("s_support", "q_support", "nm_qx_maxpct")
+
+
+def ensure_enriched(work: Path, split: str) -> None:
+    """Run `enrich` unless `extra/` exists and already carries the latest columns."""
+    parts = sorted((work / split / "extra").glob("*.parquet"))
+    if parts and all(c in pl.read_parquet_schema(parts[0]) for c in LATEST_COLS):
+        return
+    _log(f"{split}/extra missing or stale -> re-running enrich")
+    enrich(work, split)
+
+
 def enrich(work: Path, split: str) -> None:
     q, s1 = _records(work, split)
     vocab = token_stats(q, s1)

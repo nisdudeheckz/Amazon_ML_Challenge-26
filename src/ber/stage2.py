@@ -26,7 +26,7 @@ import numpy as np
 import polars as pl
 
 from . import config
-from .enrich import enrich
+from .enrich import ensure_enriched
 from .io import read_ground_truth, read_source, write_id_lists
 from .metrics import macro_f05
 from .model import DROP_FEATURES, ID_COLS, PARAMS, _eval_s1, _train_q, choose_decision, decide, ensure_context
@@ -273,8 +273,7 @@ def predict_stage2(data: Path, work: Path, out_dir: Path, tag: str = "") -> None
 
 def step_stage2(data: Path, work: Path, out_dir: Path) -> None:
     for split in ("train", "test"):
-        if not (work / split / "extra").exists():
-            enrich(work, split)
+        ensure_enriched(work, split)
     fit_stage1_folds(data, work)
     for split in ("train", "test"):
         predict_stage1(work, split)
