@@ -34,6 +34,9 @@ def _log(msg: str) -> None:
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
 
 
+NORM_SLICE = 1_000_000
+
+
 def norm_paths(work: Path, split: str) -> dict[int, Path]:
     return {s: work / "norm" / f"{split}_s{s}.parquet" for s in (1, 2, 3)}
 
@@ -57,7 +60,10 @@ def step_prepare(data: Path, work: Path) -> None:
             if out.exists():
                 continue
             tmp = out.with_suffix(".tmp")
-            normalize(read_source(data / split / f"{split}_source{s}.tsv"), maps).write_parquet(tmp)
+            raw = read_source(data / split / f"{split}_source{s}.tsv")
+            # row-wise, so slicing only lowers peak memory
+            pl.concat([normalize(raw.slice(a, NORM_SLICE), maps) for a in range(0, len(raw), NORM_SLICE)]).write_parquet(tmp)
+            del raw
             tmp.replace(out)
             _log(f"normalised {split} source {s}")
 

@@ -23,7 +23,7 @@ from .pairfeat import pair_features, record_meta
 K_RETRIEVE = 20     # neighbours retrieved per query (context features use all of them)
 K_KEEP = 10         # candidates kept per query ...
 KEEP_RATIO = 0.6    # ... if their blocking score >= KEEP_RATIO * the query's best score
-CHUNK = 500_000      # queries per feature chunk
+CHUNK = config.CHUNK  # queries per feature chunk (memory knob; output-invariant)
 DF_SLICE = 250_000   # rows per slice when counting corpus document frequencies
 
 
