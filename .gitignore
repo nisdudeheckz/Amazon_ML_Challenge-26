@@ -33,3 +33,6 @@ Submissions/**/*.zip
 .vscode/
 .idea/
 /aws/.render/
+
+# Local copies of submitted champion outputs (large, never overwrite)
+/champion/
