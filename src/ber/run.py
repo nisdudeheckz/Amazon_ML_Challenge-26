@@ -8,6 +8,7 @@
     python -m ber.run xval       ...   # cross-country transfer experiments (proxy for unseen countries)
     python -m ber.run xval_st    ...   # the same with self-training on the target country
     python -m ber.run xval_ablate ...  # cross-country effect of dropping country-scale features
+    python -m ber.run phantom    ...   # after stage2: stage 2 re-fit / re-tuned with orphan records
 
   single-stage variant (Submission-1):
     python -m ber.run train      ...   # LightGBM + threshold tuning on a held-out S1 split
@@ -24,7 +25,7 @@ from pathlib import Path
 
 import polars as pl
 
-from . import candidates, enrich, experiments, model, stage2, translit
+from . import candidates, enrich, experiments, model, phantom, stage2, translit
 from .io import read_ground_truth, read_source
 from .normalize import normalize
 
@@ -38,18 +39,27 @@ def norm_paths(work: Path, split: str) -> dict[int, Path]:
 
 
 def step_prepare(data: Path, work: Path) -> None:
+    """Resumable: an existing translit.json and finished norm files are reused (each norm
+    file is written to a temporary name first, so a crash never leaves a partial one)."""
     (work / "norm").mkdir(parents=True, exist_ok=True)
-    raw = {s: read_source(data / "train" / f"train_source{s}.tsv") for s in (1, 2, 3)}
-    pairs = read_ground_truth(data / "train" / "train_ground_truth.tsv")
-    maps = translit.learn(raw[1], pl.concat([raw[2], raw[3]]), pairs)
-    translit.save(maps, work / "translit.json")
-    _log(f"learned transliteration maps: {len(maps['name'])} name tokens, {len(maps['addr'])} address components")
-    for s in (1, 2, 3):
-        normalize(raw[s], maps).write_parquet(norm_paths(work, "train")[s])
-    del raw
-    for s in (1, 2, 3):
-        normalize(read_source(data / "test" / f"test_source{s}.tsv"), maps).write_parquet(norm_paths(work, "test")[s])
-        _log(f"normalised test source {s}")
+    if (work / "translit.json").exists():
+        maps = translit.load(work / "translit.json")
+    else:
+        raw = {s: read_source(data / "train" / f"train_source{s}.tsv") for s in (1, 2, 3)}
+        pairs = read_ground_truth(data / "train" / "train_ground_truth.tsv")
+        maps = translit.learn(raw[1], pl.concat([raw[2], raw[3]]), pairs)
+        translit.save(maps, work / "translit.json")
+        del raw, pairs
+    _log(f"transliteration maps: {len(maps['name'])} name tokens, {len(maps['addr'])} address components")
+    for split in ("train", "test"):
+        for s in (1, 2, 3):
+            out = norm_paths(work, split)[s]
+            if out.exists():
+                continue
+            tmp = out.with_suffix(".tmp")
+            normalize(read_source(data / split / f"{split}_source{s}.tsv"), maps).write_parquet(tmp)
+            tmp.replace(out)
+            _log(f"normalised {split} source {s}")
 
 
 def step_candidates(work: Path, splits: list[str], only: list[str] | None = None) -> None:
@@ -60,7 +70,7 @@ def step_candidates(work: Path, splits: list[str], only: list[str] | None = None
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("step", choices=["prepare", "candidates", "enrich", "train", "tune", "predict", "stage2", "xval", "xval_st", "xval_ablate", "all"])
+    ap.add_argument("step", choices=["prepare", "candidates", "enrich", "train", "tune", "predict", "stage2", "xval", "xval_st", "xval_ablate", "phantom", "all"])
     ap.add_argument("--data-dir", type=Path, default=Path("../student_resource/dataset"))
     ap.add_argument("--work-dir", type=Path, default=Path("../work"))
     ap.add_argument("--out-dir", type=Path, default=Path("../output"))
@@ -90,6 +100,8 @@ def main() -> None:
         experiments.cross_country_selftrain(args.data_dir, work)
     if args.step in ("stage2", "all"):
         stage2.step_stage2(args.data_dir, work, args.out_dir)
+    if args.step == "phantom":
+        phantom.run(args.data_dir, work, args.out_dir)
 
 
 if __name__ == "__main__":

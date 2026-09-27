@@ -10,6 +10,8 @@ BER_THREADS // BER_JOBS threads); every country needs up to ~14 GB of RAM.
     BER_TRAIN_FRAC  per mille of non-held-out records used for fitting     (default: 400)
     BER_SELF_TRAIN  1 = also refit stage 2 on confident test pseudo-labels and write a
                     second output to <out>/selftrain/                      (default: 0)
+    BER_PHANTOM     `phantom` step: per mille of train S1 entities removed to leave
+                    orphan records, as in test                           (default: 180)
 """
 from __future__ import annotations
 
@@ -20,3 +22,4 @@ JOBS = max(1, int(os.environ.get("BER_JOBS", "1")))
 MAX_DF = int(os.environ.get("BER_MAX_DF", "6000"))
 TRAIN_FRAC = int(os.environ.get("BER_TRAIN_FRAC", "400"))
 SELF_TRAIN = os.environ.get("BER_SELF_TRAIN", "0") == "1"
+PHANTOM = int(os.environ.get("BER_PHANTOM", "180"))

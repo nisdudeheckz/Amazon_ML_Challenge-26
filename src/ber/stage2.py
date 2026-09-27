@@ -135,7 +135,16 @@ def predict_stage1(work: Path, split: str) -> None:
 # ----------------------------------------------------------------------------- stage-2 features
 
 def build_stage2_features(work: Path, split: str) -> None:
-    p1 = pl.read_parquet(work / split / "p1.parquet")
+    agg = stage2_aggregates(pl.read_parquet(work / split / "p1.parquet"), pl.read_parquet(ensure_context(work, split)))
+    out_dir = work / split / "s2feat"
+    out_dir.mkdir(exist_ok=True)
+    for (part,), sub in agg.partition_by("part", as_dict=True).items():
+        sub.drop("part").write_parquet(out_dir / f"{part}.parquet")
+    _log(f"stage-2 features for {split}: {agg.shape}")
+
+
+def stage2_aggregates(p1: pl.DataFrame, ctx: pl.DataFrame) -> pl.DataFrame:
+    """Competition features from the stage-1 probabilities of all pairs of a split."""
     agg = p1.with_columns(
         pl.col("p1").rank("ordinal", descending=True).over("q_id").cast(pl.Int16).alias("q_p1_rank"),
         pl.col("p1").max().over("q_id").alias("q_p1_max"),
@@ -155,12 +164,7 @@ def build_stage2_features(work: Path, split: str) -> None:
     best = agg.filter(pl.col("q_p1_rank") == 1).group_by("s1_id").agg(
         pl.col("p1").sum().alias("s_best_sum"), (pl.col("p1") > 0.5).sum().cast(pl.Int16).alias("s_best_n50"))
     agg = agg.join(best, on="s1_id", how="left").with_columns(pl.col("s_best_sum", "s_best_n50").fill_null(0))
-    agg = agg.join(pl.read_parquet(ensure_context(work, split)), on=ID_COLS, how="left")
-    out_dir = work / split / "s2feat"
-    out_dir.mkdir(exist_ok=True)
-    for (part,), sub in agg.partition_by("part", as_dict=True).items():
-        sub.drop("part").write_parquet(out_dir / f"{part}.parquet")
-    _log(f"stage-2 features for {split}: {agg.shape}")
+    return agg.join(ctx, on=ID_COLS, how="left")
 
 
 def iter_stage2(work: Path, split: str) -> Iterator[pl.DataFrame]:
