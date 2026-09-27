@@ -1,0 +1,4 @@
+  matching_results.tsv: 1732544 rows (98588 empty, 1633956 non-empty).
+  candidate_pairs.tsv: 1732544 rows (50 empty, 1732494 non-empty).
+
+PASS — no blocking issues found. Safe to submit.
