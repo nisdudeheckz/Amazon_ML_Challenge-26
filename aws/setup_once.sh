@@ -44,10 +44,12 @@ if aws s3api head-object --bucket "$BUCKET" --key data/dataset.tar.gz >/dev/null
   log "dataset already uploaded"
 else
   log "compressing dataset ..."
-  tar czf dataset.tar.gz -C student_resource dataset
-  log "uploading $(du -h dataset.tar.gz | cut -f1) ..."
-  aws s3 cp dataset.tar.gz "s3://$BUCKET/data/dataset.tar.gz"
-  rm -f dataset.tar.gz
+  # DATA_ROOT: folder containing dataset/ (default: the repo's student_resource/)
+  tgz="${TGZ_DIR:-.}/dataset.tar.gz"
+  tar czf "$tgz" -C "${DATA_ROOT:-student_resource}" dataset
+  log "uploading $(du -h "$tgz" | cut -f1) ..."
+  aws s3 cp "$tgz" "s3://$BUCKET/data/dataset.tar.gz"
+  rm -f "$tgz"
 fi
 
 # ---- EC2 vCPU quotas (new accounts are often limited; request an increase if too low)

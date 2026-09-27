@@ -46,4 +46,7 @@ cd src
 for step in $STEPS; do
   echo "[$(date -u +%FT%TZ)] ===== step $step"
   ../.venv/bin/python -m ber.run "$step" --data-dir ../dataset --work-dir ../work --out-dir ../output
+  # publish what exists after every step, so results survive a later timeout
+  [ -d ../output ] && aws s3 cp ../output "$S3/output" --recursive --only-show-errors || true
+  for f in ../work/*.json; do [ -f "$f" ] && aws s3 cp "$f" "$S3/reports/$(basename "$f")" --only-show-errors; done || true
 done
